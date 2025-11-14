@@ -32,10 +32,7 @@ while time.time() - start_time < max_wait_time:
                 while True:
                     sample, timestamp = inlet.pull_sample(timeout=1.0)
                     if sample:
-                        print(f"🎯 [{time.strftime('%H:%M:%S')}] {sample[0]}")
-                    else:
-                        # Show we're still alive but waiting
-                        print(".", end="", flush=True)
+                        print(f"[{time.strftime('%H:%M:%S')}] {sample[0]}")
             except KeyboardInterrupt:
                 print("\n\nMonitoring stopped by user.")
                 break
