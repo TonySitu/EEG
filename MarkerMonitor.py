@@ -52,7 +52,7 @@ while time.time() - start_time < max_wait_time:
 if time.time() - start_time >= max_wait_time:
     print(f"\n✗ Timeout: Could not find MotorImageryMarkers stream after {max_wait_time} seconds")
     print("\nTroubleshooting tips:")
-    print("1. Make sure main.py is running and sending markers")
+    print("1. Make sure EEGGui.py is running and sending markers")
     print("2. Check if Windows Firewall is blocking LSL")
     print("3. Try running as Administrator")
     print("4. Make sure both programs are on the same computer")
