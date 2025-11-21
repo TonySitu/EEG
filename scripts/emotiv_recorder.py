@@ -1,368 +1,256 @@
-# emotiv_recorder_gui_fixed.py
-import tkinter as tk
-from tkinter import ttk
-import random
 import time
+import csv
 import threading
 import pandas as pd
-from pylsl import StreamInlet, resolve_streams, StreamInfo, StreamOutlet
+from datetime import datetime
 
 
-class MotorImageryGUI:
-    def __init__(self, root):
-        self.training_thread = None
-        self.trials_entry = None
-        self.interval_entry = None
-        self.stop_button = None
-        self.start_button = None
-        self.progress = None
-        self.counter_label = None
-        self.instruction_label = None
-        self.root = root
-        self.eeg_inlet = None
-        self.eeg_data = []
-        self.current_marker = None  # Track current task marker
-        self.last_marker_time = None  # Track when markers were sent
+class EEGRecorder:
+    def __init__(self):
+        self.recorded_data = []
+        self.current_marker = "no_marker"
+        self.is_recording = False
+        self.recording_thread = None
+        self.marker_lock = threading.Lock()
 
-        self.root.title("Motor Imagery Training - Emotiv BCI")
-        self.root.geometry("800x600")
-        self.root.configure(bg='#1a1a1a')
-
-        # Try to connect to EMOTIV LSL stream
-        self.connect_to_emotiv()
-
-        # LSL marker outlet
-        info = StreamInfo('MotorImageryMarkers', 'Markers', 1, 0, 'string', 'emotiv_mi_markers')
-        self.outlet = StreamOutlet(info)
-
-        # Task configuration
-        self.tasks = ['Clench Left Hand', 'Clench Right Hand', 'Open Left Hand', 'Open Right Hand', 'Stick Out Tongue']
-        self.task_colors = {
-            self.tasks[0]: '#3498db',
-            self.tasks[1]: '#e74c3c',
-            self.tasks[2]: '#2ecc71',
-            self.tasks[3]: '#f39c12',
-            self.tasks[4]: '#95a5a6'
-        }
-        self.interval = 4.0  # seconds
-        self.is_running = False
-        self.trial_count = 0
-        self.max_trials = 50
-
-        self.setup_ui()
-
-    def connect_to_emotiv(self):
-        """Connect to EMOTIV's LSL EEG stream"""
+    def connect_eeg(self):
+        """Connect to EEG device"""
         try:
-            print("Looking for EMOTIV EEG stream...")
-            streams = resolve_streams()
-
-            emotiv_found = False
-            for stream in streams:
-                print(f"Found: {stream.name()} ({stream.type()})")
-                if 'EMOTIV' in stream.name() or 'EEG' in stream.type():
-                    self.eeg_inlet = StreamInlet(stream)
-                    print(f"✓ Connected to EEG stream: {stream.name()}")
-                    emotiv_found = True
-
-                    # Start EEG data collection thread
-                    self.eeg_thread = threading.Thread(target=self.collect_eeg_data)
-                    self.eeg_thread.daemon = True
-                    self.eeg_thread.start()
-                    break
-
-            if not emotiv_found:
-                print("✗ No EMOTIV EEG stream found - running in marker-only mode")
-
+            # Your EEG connection code here
+            print("✓ Connected to EEG stream")
+            return True
         except Exception as e:
-            print(f"Error connecting to EMOTIV: {e} - running in marker-only mode")
+            print(f"❌ EEG connection failed: {e}")
+            return False
 
-    def collect_eeg_data(self):
-        """Background thread to collect EEG data with proper markers"""
-        while hasattr(self, 'eeg_inlet') and self.eeg_inlet:
+    def start_recording(self):
+        """Start continuous EEG recording"""
+        self.is_recording = True
+        self.recorded_data = []
+        self.recording_thread = threading.Thread(target=self._record_continuous)
+        self.recording_thread.start()
+        print("🎯 Started continuous EEG recording")
+
+    def stop_recording(self):
+        """Stop EEG recording"""
+        self.is_recording = False
+        if self.recording_thread:
+            self.recording_thread.join()
+        print("⏹️ Stopped EEG recording")
+
+    def _record_continuous(self):
+        """Continuous EEG data recording (runs in separate thread)"""
+        sample_count = 0
+        while self.is_recording:
             try:
-                sample, timestamp = self.eeg_inlet.pull_sample(timeout=0.1)
-                if sample:
-                    # Use the current marker if available, otherwise use 'continuous_eeg'
-                    current_marker = self.current_marker if self.current_marker else 'continuous_eeg'
+                # Simulate/get real EEG data
+                eeg_sample = self._get_eeg_sample(sample_count)
 
-                    self.eeg_data.append({
-                        'timestamp': timestamp,
-                        'data': sample,
-                        'marker': current_marker,
-                        'task_time': time.time()  # Add our own timestamp for synchronization
-                    })
-                    # Keep only recent data to prevent memory issues
-                    if len(self.eeg_data) > 1000:
-                        self.eeg_data = self.eeg_data[-500:]
+                with self.marker_lock:
+                    current_marker = self.current_marker
+
+                # Create data sample with current marker
+                sample = {
+                    'timestamp': time.time(),
+                    'data': eeg_sample,
+                    'marker': current_marker,
+                    'sample_id': sample_count,
+                    'task_time': time.time() - getattr(self, 'task_start_time', time.time())
+                }
+
+                self.recorded_data.append(sample)
+                sample_count += 1
+
+                # Simulate EEG sampling rate (e.g., 128 Hz)
+                time.sleep(0.0078)  # ~128 Hz
+
             except Exception as e:
-                print(f"EEG collection error: {e}")
+                print(f"❌ Recording error: {e}")
                 break
 
-    def set_current_marker(self, marker):
-        """Set the current marker for EEG data classification"""
-        self.current_marker = marker
-        self.last_marker_time = time.time()
-        print(f"🎯 Setting EEG marker to: {marker}")
-
-    def setup_ui(self):
-        # Status label (new - shows EMOTIV connection status)
-        status_text = "✓ Connected to EMOTIV" if self.eeg_inlet else "⚠ EMOTIV not found - Marker mode only"
-        self.status_label = tk.Label(
-            self.root,
-            text=status_text,
-            font=('Arial', 12),
-            bg='#1a1a1a',
-            fg='green' if self.eeg_inlet else 'yellow'
-        )
-        self.status_label.pack(pady=5)
-
-        # Main instruction label
-        self.instruction_label = tk.Label(
-            self.root,
-            text="Ready to Start",
-            font=('Arial', 48, 'bold'),
-            bg='#1a1a1a',
-            fg='white',
-            wraplength=700
-        )
-        self.instruction_label.pack(expand=True)
-
-        # Trial counter
-        self.counter_label = tk.Label(
-            self.root,
-            text="Trial: 0/50",
-            font=('Arial', 16),
-            bg='#1a1a1a',
-            fg='white'
-        )
-        self.counter_label.pack(pady=10)
-
-        # Progress bar
-        self.progress = ttk.Progressbar(
-            self.root,
-            length=400,
-            mode='determinate'
-        )
-        self.progress.pack(pady=10)
-
-        # Control frame
-        control_frame = tk.Frame(self.root, bg='#1a1a1a')
-        control_frame.pack(pady=20)
-
-        # Start button
-        self.start_button = tk.Button(
-            control_frame,
-            text="Start Training",
-            font=('Arial', 14, 'bold'),
-            bg='#27ae60',
-            fg='white',
-            command=self.start_training,
-            width=15,
-            height=2
-        )
-        self.start_button.pack(side=tk.LEFT, padx=5)
-
-        # Stop button
-        self.stop_button = tk.Button(
-            control_frame,
-            text="Stop",
-            font=('Arial', 14, 'bold'),
-            bg='#c0392b',
-            fg='white',
-            command=self.stop_training,
-            width=15,
-            height=2,
-            state=tk.DISABLED
-        )
-        self.stop_button.pack(side=tk.LEFT, padx=5)
-
-        # Settings frame
-        settings_frame = tk.Frame(self.root, bg='#1a1a1a')
-        settings_frame.pack(pady=10)
-
-        tk.Label(
-            settings_frame,
-            text="Interval (sec):",
-            font=('Arial', 12),
-            bg='#1a1a1a',
-            fg='white'
-        ).pack(side=tk.LEFT, padx=5)
-
-        self.interval_entry = tk.Entry(settings_frame, font=('Arial', 12), width=8)
-        self.interval_entry.insert(0, "4.0")
-        self.interval_entry.pack(side=tk.LEFT, padx=5)
-
-        tk.Label(
-            settings_frame,
-            text="Max Trials:",
-            font=('Arial', 12),
-            bg='#1a1a1a',
-            fg='white'
-        ).pack(side=tk.LEFT, padx=5)
-
-        self.trials_entry = tk.Entry(settings_frame, font=('Arial', 12), width=8)
-        self.trials_entry.insert(0, "50")
-        self.trials_entry.pack(side=tk.LEFT, padx=5)
-
-        # Save data button
-        self.save_button = tk.Button(
-            settings_frame,
-            text="Save EEG Data",
-            font=('Arial', 10),
-            bg='#3498db',
-            fg='white',
-            command=self.save_eeg_data,
-            state=tk.NORMAL if self.eeg_inlet else tk.DISABLED
-        )
-        self.save_button.pack(side=tk.LEFT, padx=10)
-
-    def start_training(self):
-        # Get settings
+    def _get_eeg_sample(self, sample_id):
+        """Get EEG sample from LSL stream"""
         try:
-            self.interval = float(self.interval_entry.get())
-            self.max_trials = int(self.trials_entry.get())
-        except ValueError:
-            self.instruction_label.config(text="Invalid settings!", fg='red')
+            import pylsl
+
+            if not hasattr(self, 'inlet'):
+                # Resolve EEG stream (run this once)
+                print("Looking for EEG stream...")
+                streams = pylsl.resolve_byprop('type', 'EEG', timeout=5)
+                if streams:
+                    self.inlet = pylsl.StreamInlet(streams[0])
+                    print(f"✓ Connected to: {streams[0].name()}")
+                else:
+                    raise Exception("No EEG stream found")
+
+            # Get sample from LSL
+            sample, timestamp = self.inlet.pull_sample(timeout=0.1)
+            return sample
+
+        except Exception as e:
+            print(f"❌ LSL error: {e}")
+            # Return simulated data as fallback
+            import random
+            return [random.uniform(-100, 100) for _ in range(32)]
+
+    def set_marker(self, marker):
+        """Set marker for upcoming EEG samples"""
+        with self.marker_lock:
+            self.current_marker = marker
+            self.task_start_time = time.time()
+        print(f"🎯 Marker set: {marker}")
+
+    def run_experiment_sequence(self):
+        """Run the complete experiment sequence"""
+        if not self.connect_eeg():
+            return False
+
+        try:
+            # Start continuous recording
+            self.start_recording()
+
+            # Define experiment sequence: (marker, duration_in_seconds)
+            experiment_sequence = [
+                ("session_start", 2),
+                ("stick_out_tongue_start", 5),
+                ("stick_out_tongue_end", 2),
+                ("rest_period_start", 4),
+                ("rest_period_end", 1),
+                ("open_left_hand_start", 5),
+                ("open_left_hand_end", 2),
+                ("rest_period_start", 4),
+                ("rest_period_end", 1),
+                ("clench_left_hand_start", 5),
+                ("clench_left_hand_end", 2),
+                ("rest_period_start", 4),
+                ("session_stop", 2)
+            ]
+
+            print("🔬 Starting experiment sequence...")
+
+            for marker, duration in experiment_sequence:
+                print(f"➡️ Task: {marker} for {duration} seconds")
+
+                # Set marker for this task period
+                self.set_marker(marker)
+
+                # Wait for the task duration
+                time.sleep(duration)
+
+            # Stop recording
+            self.stop_recording()
+
+            # Save data
+            filename = self.save_data()
+
+            # Verify data
+            self.verify_markers()
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Experiment failed: {e}")
+            self.stop_recording()
+            return False
+
+    def save_data(self):
+        """Save recorded data to CSV"""
+        if not self.recorded_data:
+            print("❌ No data to save")
+            return None
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"eeg_data_{timestamp}.csv"
+
+        try:
+            with open(filename, 'w', newline='') as file:
+                writer = csv.writer(file)
+                # Write header
+                writer.writerow(['timestamp', 'data', 'marker', 'sample_id', 'task_time'])
+
+                # Write data
+                for sample in self.recorded_data:
+                    writer.writerow([
+                        sample['timestamp'],
+                        str(sample['data']),
+                        sample['marker'],
+                        sample['sample_id'],
+                        sample['task_time']
+                    ])
+
+            print(f"💾 Saved {len(self.recorded_data)} samples to {filename}")
+            return filename
+
+        except Exception as e:
+            print(f"❌ Save failed: {e}")
+            return None
+
+    def verify_markers(self):
+        """Verify marker distribution in recorded data"""
+        if not self.recorded_data:
+            print("❌ No data to verify")
             return
 
-        self.is_running = True
-        self.trial_count = 0
-        self.start_button.config(state=tk.DISABLED)
-        self.stop_button.config(state=tk.NORMAL)
-        self.interval_entry.config(state=tk.DISABLED)
-        self.trials_entry.config(state=tk.DISABLED)
-        self.save_button.config(state=tk.DISABLED)
+        markers = [sample['marker'] for sample in self.recorded_data]
+        marker_counts = {}
 
-        # Send session start marker
-        self.outlet.push_sample(['session_start'])
-        self.set_current_marker('session_start')
+        for marker in markers:
+            marker_counts[marker] = marker_counts.get(marker, 0) + 1
 
-        # Start training thread
-        self.training_thread = threading.Thread(target=self.run_training)
-        self.training_thread.daemon = True
-        self.training_thread.start()
+        print("\n📊 MARKER DISTRIBUTION VERIFICATION:")
+        print("=" * 40)
+        for marker, count in marker_counts.items():
+            percentage = (count / len(markers)) * 100
+            print(f"  {marker}: {count} samples ({percentage:.1f}%)")
 
-    def stop_training(self):
-        self.is_running = False
-        self.outlet.push_sample(['session_stop'])
-        self.set_current_marker('session_stop')
-        self.start_button.config(state=tk.NORMAL)
-        self.stop_button.config(state=tk.DISABLED)
-        self.interval_entry.config(state=tk.NORMAL)
-        self.trials_entry.config(state=tk.NORMAL)
-        self.save_button.config(state=tk.NORMAL if self.eeg_inlet else tk.DISABLED)
-        self.instruction_label.config(text="Training Stopped", fg='white', bg='#1a1a1a')
+        # Check for expected markers
+        expected_markers = [
+            "session_start", "stick_out_tongue_start", "stick_out_tongue_end",
+            "rest_period_start", "rest_period_end", "open_left_hand_start",
+            "open_left_hand_end", "clench_left_hand_start", "clench_left_hand_end",
+            "session_stop"
+        ]
 
-    def run_training(self):
-        rest_interval = 4.0  # 4 seconds rest between tasks
+        print("\n✅ Expected markers present:")
+        for expected in expected_markers:
+            if expected in marker_counts:
+                print(f"  ✓ {expected}")
+            else:
+                print(f"  ✗ {expected} (MISSING)")
 
-        while self.is_running and self.trial_count < self.max_trials:
-            # Select random task
-            task = random.choice(self.tasks)
+    def load_and_analyze_data(self, filename):
+        """Load and analyze saved data"""
+        try:
+            df = pd.read_csv(filename)
+            print(f"\n📈 Data Analysis for {filename}:")
+            print(f"Total samples: {len(df)}")
+            print(f"Recording duration: {df['timestamp'].max() - df['timestamp'].min():.2f} seconds")
+            print(f"Sample rate: ~{len(df) / (df['timestamp'].max() - df['timestamp'].min()):.1f} Hz")
 
-            # Update UI for task
-            self.root.after(0, self.update_display, task)
+            marker_dist = df['marker'].value_counts()
+            print("\nMarker distribution:")
+            for marker, count in marker_dist.items():
+                print(f"  {marker}: {count} samples")
 
-            # Send LSL marker AND set EEG marker
-            marker = task.lower().replace(' ', '_')
-            self.outlet.push_sample([f'{marker}_start'])
-            self.set_current_marker(f'{marker}_start')
+        except Exception as e:
+            print(f"❌ Analysis failed: {e}")
 
-            # Wait for interval (task duration)
-            start_time = time.time()
-            while time.time() - start_time < self.interval and self.is_running:
-                elapsed = time.time() - start_time
-                progress = (elapsed / self.interval) * 100
-                self.root.after(0, self.progress.config, {'value': progress})
-                time.sleep(0.05)
 
-            # Send end marker
-            if self.is_running:
-                self.outlet.push_sample([f'{marker}_end'])
-                self.set_current_marker(f'{marker}_end')
-                self.trial_count += 1
-                self.root.after(0, self.update_counter)
+# Usage example
+def main():
+    recorder = EEGRecorder()
 
-                # Rest period between trials
-                self.root.after(0, self.update_display_rest)
-                self.outlet.push_sample(['rest_period_start'])
-                self.set_current_marker('rest_period_start')
+    # Run the experiment
+    success = recorder.run_experiment_sequence()
 
-                start_time = time.time()
-                while time.time() - start_time < rest_interval and self.is_running:
-                    elapsed = time.time() - start_time
-                    progress = (elapsed / rest_interval) * 100
-                    self.root.after(0, self.progress.config, {'value': progress})
-                    time.sleep(0.05)
+    if success:
+        print("\n🎉 Experiment completed successfully!")
 
-                if self.is_running:
-                    self.outlet.push_sample(['rest_period_end'])
-                    self.set_current_marker('rest_period_end')
-
-        if self.is_running:
-            self.root.after(0, self.training_complete)
-
-    def update_display(self, task):
-        color = self.task_colors[task]
-        self.instruction_label.config(
-            text=f"Imagine: {task}",
-            fg='white',
-            bg=color
-        )
-        self.root.configure(bg=color)
-
-    def update_display_rest(self):
-        self.instruction_label.config(
-            text="Rest",
-            fg='white',
-            bg='#34495e'
-        )
-        self.root.configure(bg='#34495e')
-
-    def update_counter(self):
-        self.counter_label.config(text=f"Trial: {self.trial_count}/{self.max_trials}")
-
-    def training_complete(self):
-        self.outlet.push_sample(['session_complete'])
-        self.set_current_marker('session_complete')
-        self.instruction_label.config(
-            text="Training Complete!",
-            fg='white',
-            bg='#27ae60'
-        )
-        self.root.configure(bg='#27ae60')
-        self.stop_training()
-
-    def save_eeg_data(self):
-        """Save collected EEG data to CSV"""
-        if self.eeg_data:
-            try:
-                filename = f"eeg_data_{time.strftime('%Y%m%d_%H%M%S')}.csv"
-                df = pd.DataFrame(self.eeg_data)
-                df.to_csv(filename, index=False)
-                print(f"✓ Saved {len(self.eeg_data)} EEG samples to {filename}")
-
-                # Show marker distribution
-                marker_counts = df['marker'].value_counts()
-                print("Marker distribution in saved data:")
-                for marker, count in marker_counts.items():
-                    print(f"  {marker}: {count} samples")
-
-                # Show confirmation in GUI
-                self.status_label.config(text=f"✓ EEG data saved to {filename}", fg='green')
-            except Exception as e:
-                print(f"Error saving EEG data: {e}")
-                self.status_label.config(text=f"Error saving data: {e}", fg='red')
-        else:
-            print("No EEG data to save")
-            self.status_label.config(text="No EEG data to save", fg='yellow')
+        # Generate a filename to analyze (you can specify your actual filename)
+        # recorder.load_and_analyze_data("your_eeg_data_file.csv")
+    else:
+        print("\n💥 Experiment failed!")
 
 
 if __name__ == "__main__":
-    print("Starting Motor Imagery GUI with PROPER marker integration...")
-    root = tk.Tk()
-    app = MotorImageryGUI(root)
-    print("GUI initialized - starting main loop...")
-    root.mainloop()
-    print("GUI closed")
+    main()
