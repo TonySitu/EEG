@@ -1,4 +1,4 @@
-# emotiv_recorder_gui.py
+# emotiv_recorder_gui_fixed.py
 import tkinter as tk
 from tkinter import ttk
 import random
@@ -21,6 +21,8 @@ class MotorImageryGUI:
         self.root = root
         self.eeg_inlet = None
         self.eeg_data = []
+        self.current_marker = None  # Track current task marker
+        self.last_marker_time = None  # Track when markers were sent
 
         self.root.title("Motor Imagery Training - Emotiv BCI")
         self.root.geometry("800x600")
@@ -76,15 +78,19 @@ class MotorImageryGUI:
             print(f"Error connecting to EMOTIV: {e} - running in marker-only mode")
 
     def collect_eeg_data(self):
-        """Background thread to collect EEG data"""
+        """Background thread to collect EEG data with proper markers"""
         while hasattr(self, 'eeg_inlet') and self.eeg_inlet:
             try:
                 sample, timestamp = self.eeg_inlet.pull_sample(timeout=0.1)
                 if sample:
+                    # Use the current marker if available, otherwise use 'continuous_eeg'
+                    current_marker = self.current_marker if self.current_marker else 'continuous_eeg'
+
                     self.eeg_data.append({
                         'timestamp': timestamp,
                         'data': sample,
-                        'marker': 'continuous_eeg'
+                        'marker': current_marker,
+                        'task_time': time.time()  # Add our own timestamp for synchronization
                     })
                     # Keep only recent data to prevent memory issues
                     if len(self.eeg_data) > 1000:
@@ -92,6 +98,12 @@ class MotorImageryGUI:
             except Exception as e:
                 print(f"EEG collection error: {e}")
                 break
+
+    def set_current_marker(self, marker):
+        """Set the current marker for EEG data classification"""
+        self.current_marker = marker
+        self.last_marker_time = time.time()
+        print(f"🎯 Setting EEG marker to: {marker}")
 
     def setup_ui(self):
         # Status label (new - shows EMOTIV connection status)
@@ -224,6 +236,7 @@ class MotorImageryGUI:
 
         # Send session start marker
         self.outlet.push_sample(['session_start'])
+        self.set_current_marker('session_start')
 
         # Start training thread
         self.training_thread = threading.Thread(target=self.run_training)
@@ -233,6 +246,7 @@ class MotorImageryGUI:
     def stop_training(self):
         self.is_running = False
         self.outlet.push_sample(['session_stop'])
+        self.set_current_marker('session_stop')
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
         self.interval_entry.config(state=tk.NORMAL)
@@ -250,9 +264,10 @@ class MotorImageryGUI:
             # Update UI for task
             self.root.after(0, self.update_display, task)
 
-            # Send LSL marker
+            # Send LSL marker AND set EEG marker
             marker = task.lower().replace(' ', '_')
             self.outlet.push_sample([f'{marker}_start'])
+            self.set_current_marker(f'{marker}_start')
 
             # Wait for interval (task duration)
             start_time = time.time()
@@ -265,12 +280,14 @@ class MotorImageryGUI:
             # Send end marker
             if self.is_running:
                 self.outlet.push_sample([f'{marker}_end'])
+                self.set_current_marker(f'{marker}_end')
                 self.trial_count += 1
                 self.root.after(0, self.update_counter)
 
                 # Rest period between trials
                 self.root.after(0, self.update_display_rest)
                 self.outlet.push_sample(['rest_period_start'])
+                self.set_current_marker('rest_period_start')
 
                 start_time = time.time()
                 while time.time() - start_time < rest_interval and self.is_running:
@@ -281,6 +298,7 @@ class MotorImageryGUI:
 
                 if self.is_running:
                     self.outlet.push_sample(['rest_period_end'])
+                    self.set_current_marker('rest_period_end')
 
         if self.is_running:
             self.root.after(0, self.training_complete)
@@ -307,6 +325,7 @@ class MotorImageryGUI:
 
     def training_complete(self):
         self.outlet.push_sample(['session_complete'])
+        self.set_current_marker('session_complete')
         self.instruction_label.config(
             text="Training Complete!",
             fg='white',
@@ -324,6 +343,12 @@ class MotorImageryGUI:
                 df.to_csv(filename, index=False)
                 print(f"✓ Saved {len(self.eeg_data)} EEG samples to {filename}")
 
+                # Show marker distribution
+                marker_counts = df['marker'].value_counts()
+                print("Marker distribution in saved data:")
+                for marker, count in marker_counts.items():
+                    print(f"  {marker}: {count} samples")
+
                 # Show confirmation in GUI
                 self.status_label.config(text=f"✓ EEG data saved to {filename}", fg='green')
             except Exception as e:
@@ -335,7 +360,7 @@ class MotorImageryGUI:
 
 
 if __name__ == "__main__":
-    print("Starting Motor Imagery GUI with EMOTIV integration...")
+    print("Starting Motor Imagery GUI with PROPER marker integration...")
     root = tk.Tk()
     app = MotorImageryGUI(root)
     print("GUI initialized - starting main loop...")
