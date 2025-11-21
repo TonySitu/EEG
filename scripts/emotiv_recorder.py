@@ -1,3 +1,4 @@
+import time
 import threading
 import pandas as pd
 from datetime import datetime
@@ -78,6 +79,8 @@ class EEGDataCollector:
         """
         sample_count = 0
         last_marker = None
+        session_stop_time = None
+        grace_period = 2.0  # seconds to keep recording after session_stop
 
         while self.is_recording:
             try:
@@ -93,7 +96,7 @@ class EEGDataCollector:
                     sample_count += 1
 
                 # Pull ALL available marker samples (non-blocking)
-                # Important: pull ALL markers, so we don't miss any
+                # Important: pull ALL markers so we don't miss any
                 while True:
                     marker_sample, marker_timestamp = self.marker_inlet.pull_sample(timeout=0.0)
                     if marker_sample is None:
@@ -109,6 +112,18 @@ class EEGDataCollector:
                     if marker_label != last_marker:
                         print(f"📍 Marker: '{marker_label}' at LSL time {marker_timestamp:.3f}")
                         last_marker = marker_label
+
+                    # Auto-stop detection
+                    if marker_label in ['session_stop', 'session_complete']:
+                        if session_stop_time is None:
+                            session_stop_time = time.time()
+                            print(f"\n⏰ Session end detected! Will auto-stop in {grace_period} seconds...")
+
+                # Check if we should auto-stop
+                if session_stop_time and (time.time() - session_stop_time) >= grace_period:
+                    print(f"✓ Grace period complete. Auto-stopping...")
+                    self.is_recording = False
+                    break
 
             except Exception as e:
                 print(f"❌ Recording error: {e}")
@@ -274,13 +289,14 @@ def main():
     1. Start this script first
     2. Then start your GUI
     3. Run your experiment in the GUI
-    4. Press Enter here when experiment is complete
+    4. Collector will AUTO-STOP 2 seconds after seeing 'session_stop'
+       (Or press Enter to stop manually)
     5. Data will be saved automatically
     """
     collector = EEGDataCollector()
 
     print("=" * 60)
-    print("EEG DATA COLLECTOR")
+    print("EEG DATA COLLECTOR (with Auto-Stop)")
     print("=" * 60)
     print("\nThis collector listens passively to EEG and Marker streams.")
     print("Make sure your EEG device is streaming before continuing.\n")
@@ -292,21 +308,32 @@ def main():
 
     print("\n✓ Connected successfully!")
     print("\nNow you can start your GUI and run the experiment.")
-    print("This collector will record everything automatically.\n")
+    print("This collector will:")
+    print("  - Record everything automatically")
+    print("  - AUTO-STOP 2 seconds after 'session_stop' marker")
+    print("  - Or press ENTER anytime to stop manually\n")
 
     # Start recording
     collector.start_recording()
 
     try:
-        # Wait for user to stop
-        input("Press ENTER when experiment is complete to stop recording and save data...\n")
+        # Wait for user to stop OR auto-stop
+        print("🎙️ Recording... (waiting for session_stop or manual stop)\n")
+
+        # Monitor for auto-stop
+        while collector.is_recording:
+            time.sleep(0.1)
+
+        print("\n✓ Recording stopped")
 
     except KeyboardInterrupt:
         print("\n\n⚠️ Interrupted by user")
+        collector.stop_recording()
 
     finally:
-        # Stop recording
-        collector.stop_recording()
+        # Make sure recording is stopped
+        if collector.is_recording:
+            collector.stop_recording()
 
         # Save data
         print("\n💾 Saving data...")
@@ -314,6 +341,7 @@ def main():
 
         if filename:
             print(f"\n✅ SUCCESS! Data saved to: {filename}")
+            print("\nYou can now close this window.")
         else:
             print("\n❌ Failed to save data")
 
