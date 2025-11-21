@@ -1,255 +1,321 @@
-import time
-import csv
 import threading
 import pandas as pd
 from datetime import datetime
+import pylsl
 
 
-class EEGRecorder:
+class EEGDataCollector:
+    """
+    Passive EEG data collector that listens to EEG and Marker streams.
+    Does NOT control the experiment - just records what it receives.
+    """
+
     def __init__(self):
-        self.recorded_data = []
-        self.current_marker = "no_marker"
+        self.eeg_data = []  # Stores EEG samples with timestamps
+        self.marker_events = []  # Stores marker events with timestamps
         self.is_recording = False
         self.recording_thread = None
-        self.marker_lock = threading.Lock()
+        self.eeg_inlet = None
+        self.marker_inlet = None
 
-    def connect_eeg(self):
-        """Connect to EEG device"""
+    def connect(self):
+        """Connect to EEG and Marker streams"""
         try:
-            # Your EEG connection code here
-            print("✓ Connected to EEG stream")
+            # Connect to EEG stream
+            print("🔍 Looking for EEG stream...")
+            eeg_streams = pylsl.resolve_byprop('type', 'EEG', timeout=10)
+            if not eeg_streams:
+                raise Exception("No EEG stream found")
+
+            self.eeg_inlet = pylsl.StreamInlet(eeg_streams[0])
+            print(f"✓ Connected to EEG: {eeg_streams[0].name()}")
+
+            # Connect to Marker stream
+            print("🔍 Looking for Marker stream...")
+            marker_streams = pylsl.resolve_byprop('type', 'Markers', timeout=10)
+            if not marker_streams:
+                raise Exception("No Marker stream found")
+
+            self.marker_inlet = pylsl.StreamInlet(marker_streams[0])
+            print(f"✓ Connected to Markers: {marker_streams[0].name()}")
+
             return True
+
         except Exception as e:
-            print(f"❌ EEG connection failed: {e}")
+            print(f"❌ Connection failed: {e}")
             return False
 
     def start_recording(self):
-        """Start continuous EEG recording"""
+        """Start recording EEG and markers"""
+        if self.is_recording:
+            print("⚠️ Already recording")
+            return
+
         self.is_recording = True
-        self.recorded_data = []
+        self.eeg_data = []
+        self.marker_events = []
         self.recording_thread = threading.Thread(target=self._record_continuous)
+        self.recording_thread.daemon = True
         self.recording_thread.start()
-        print("🎯 Started continuous EEG recording")
+        print("🎯 Started recording - listening for EEG and markers...")
 
     def stop_recording(self):
-        """Stop EEG recording"""
+        """Stop recording"""
+        if not self.is_recording:
+            return
+
         self.is_recording = False
         if self.recording_thread:
-            self.recording_thread.join()
-        print("⏹️ Stopped EEG recording")
+            self.recording_thread.join(timeout=2)
+        print(f"⏹️ Stopped recording")
+        print(f"   Collected {len(self.eeg_data)} EEG samples")
+        print(f"   Collected {len(self.marker_events)} marker events")
 
     def _record_continuous(self):
-        """Continuous EEG data recording (runs in separate thread)"""
+        """
+        Main recording loop - collects EEG and markers with LSL timestamps.
+        Runs in background thread.
+        """
         sample_count = 0
+        last_marker = None
+
         while self.is_recording:
             try:
-                # Simulate/get real EEG data
-                eeg_sample = self._get_eeg_sample(sample_count)
+                # Pull EEG sample (blocking with short timeout)
+                eeg_sample, eeg_timestamp = self.eeg_inlet.pull_sample(timeout=0.01)
 
-                with self.marker_lock:
-                    current_marker = self.current_marker
+                if eeg_sample:
+                    self.eeg_data.append({
+                        'timestamp': eeg_timestamp,
+                        'channels': eeg_sample,
+                        'sample_id': sample_count
+                    })
+                    sample_count += 1
 
-                # Create data sample with current marker
-                sample = {
-                    'timestamp': time.time(),
-                    'data': eeg_sample,
-                    'marker': current_marker,
-                    'sample_id': sample_count,
-                    'task_time': time.time() - getattr(self, 'task_start_time', time.time())
-                }
+                # Pull ALL available marker samples (non-blocking)
+                # Important: pull ALL markers, so we don't miss any
+                while True:
+                    marker_sample, marker_timestamp = self.marker_inlet.pull_sample(timeout=0.0)
+                    if marker_sample is None:
+                        break
 
-                self.recorded_data.append(sample)
-                sample_count += 1
+                    marker_label = marker_sample[0]
+                    self.marker_events.append({
+                        'timestamp': marker_timestamp,
+                        'marker': marker_label
+                    })
 
-                # Simulate EEG sampling rate (e.g., 128 Hz)
-                time.sleep(0.0078)  # ~128 Hz
+                    # Only print if it's a new marker (avoid spam)
+                    if marker_label != last_marker:
+                        print(f"📍 Marker: '{marker_label}' at LSL time {marker_timestamp:.3f}")
+                        last_marker = marker_label
 
             except Exception as e:
                 print(f"❌ Recording error: {e}")
                 break
 
-    def _get_eeg_sample(self, sample_id):
-        """Get EEG sample from LSL stream"""
-        try:
-            import pylsl
+    def align_markers_to_eeg(self):
+        """
+        Align markers to EEG samples based on LSL timestamps.
+        For each EEG sample, find the most recent marker that occurred before it.
+        """
+        if not self.eeg_data:
+            print("❌ No EEG data to align")
+            return []
 
-            if not hasattr(self, 'inlet'):
-                # Resolve EEG stream (run this once)
-                print("Looking for EEG stream...")
-                streams = pylsl.resolve_byprop('type', 'EEG', timeout=5)
-                if streams:
-                    self.inlet = pylsl.StreamInlet(streams[0])
-                    print(f"✓ Connected to: {streams[0].name()}")
-                else:
-                    raise Exception("No EEG stream found")
+        if not self.marker_events:
+            print("⚠️ No markers found - all samples will be labeled 'none'")
+            # Return EEG data with 'none' markers
+            return [{
+                'timestamp': sample['timestamp'],
+                'marker': 'none',
+                'channels': sample['channels'],
+                'sample_id': sample['sample_id']
+            } for sample in self.eeg_data]
 
-            # Get sample from LSL
-            sample, timestamp = self.inlet.pull_sample(timeout=0.1)
-            return sample
+        print(f"\n🔄 Aligning {len(self.marker_events)} markers to {len(self.eeg_data)} EEG samples...")
 
-        except Exception as e:
-            print(f"❌ LSL error: {e}")
-            # Return simulated data as fallback
-            import random
-            return [random.uniform(-100, 100) for _ in range(32)]
+        # Sort markers by timestamp (should already be sorted, but just in case)
+        sorted_markers = sorted(self.marker_events, key=lambda x: x['timestamp'])
 
-    def set_marker(self, marker):
-        """Set marker for upcoming EEG samples"""
-        with self.marker_lock:
-            self.current_marker = marker
-            self.task_start_time = time.time()
-        print(f"🎯 Marker set: {marker}")
+        # Print marker timeline
+        print("\n📋 Marker Timeline:")
+        for i, m in enumerate(sorted_markers):
+            print(f"   {i + 1}. {m['marker']} at {m['timestamp']:.3f}")
 
-    def run_experiment_sequence(self):
-        """Run the complete experiment sequence"""
-        if not self.connect_eeg():
-            return False
+        # Assign markers to EEG samples
+        aligned_data = []
+        marker_idx = 0
 
-        try:
-            # Start continuous recording
-            self.start_recording()
+        for eeg_sample in self.eeg_data:
+            eeg_time = eeg_sample['timestamp']
 
-            # Define experiment sequence: (marker, duration_in_seconds)
-            experiment_sequence = [
-                ("session_start", 2),
-                ("stick_out_tongue_start", 5),
-                ("stick_out_tongue_end", 2),
-                ("rest_period_start", 4),
-                ("rest_period_end", 1),
-                ("open_left_hand_start", 5),
-                ("open_left_hand_end", 2),
-                ("rest_period_start", 4),
-                ("rest_period_end", 1),
-                ("clench_left_hand_start", 5),
-                ("clench_left_hand_end", 2),
-                ("rest_period_start", 4),
-                ("session_stop", 2)
-            ]
+            # Find the most recent marker before or at this EEG timestamp
+            while (marker_idx < len(sorted_markers) - 1 and
+                   sorted_markers[marker_idx + 1]['timestamp'] <= eeg_time):
+                marker_idx += 1
 
-            print("🔬 Starting experiment sequence...")
+            # Assign marker if we found one before this sample
+            if marker_idx < len(sorted_markers) and sorted_markers[marker_idx]['timestamp'] <= eeg_time:
+                current_marker = sorted_markers[marker_idx]['marker']
+            else:
+                current_marker = 'none'
 
-            for marker, duration in experiment_sequence:
-                print(f"➡️ Task: {marker} for {duration} seconds")
+            aligned_data.append({
+                'timestamp': eeg_time,
+                'marker': current_marker,
+                'channels': eeg_sample['channels'],
+                'sample_id': eeg_sample['sample_id']
+            })
 
-                # Set marker for this task period
-                self.set_marker(marker)
+        return aligned_data
 
-                # Wait for the task duration
-                time.sleep(duration)
-
-            # Stop recording
-            self.stop_recording()
-
-            # Save data
-            filename = self.save_data()
-
-            # Verify data
-            self.verify_markers()
-
-            return True
-
-        except Exception as e:
-            print(f"❌ Experiment failed: {e}")
-            self.stop_recording()
-            return False
-
-    def save_data(self):
-        """Save recorded data to CSV"""
-        if not self.recorded_data:
+    def save_data(self, filename=None):
+        """Save aligned data to CSV"""
+        if not self.eeg_data:
             print("❌ No data to save")
             return None
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"eeg_data_{timestamp}.csv"
+        # Align markers to EEG
+        aligned_data = self.align_markers_to_eeg()
+
+        if not aligned_data:
+            print("❌ No aligned data to save")
+            return None
+
+        # Generate filename
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"eeg_data_{timestamp}.csv"
 
         try:
-            with open(filename, 'w', newline='') as file:
-                writer = csv.writer(file)
-                # Write header
-                writer.writerow(['timestamp', 'data', 'marker', 'sample_id', 'task_time'])
+            # Create column names for all channels
+            num_channels = len(aligned_data[0]['channels'])
+            channel_names = [f'CH{i + 1}' for i in range(num_channels)]
 
-                # Write data
-                for sample in self.recorded_data:
-                    writer.writerow([
-                        sample['timestamp'],
-                        str(sample['data']),
-                        sample['marker'],
-                        sample['sample_id'],
-                        sample['task_time']
-                    ])
+            # Prepare data for DataFrame
+            rows = []
+            for sample in aligned_data:
+                row = {
+                    'timestamp': sample['timestamp'],
+                    'marker': sample['marker'],
+                    'sample_id': sample['sample_id']
+                }
+                # Add channel data
+                for i, ch_name in enumerate(channel_names):
+                    row[ch_name] = sample['channels'][i]
+                rows.append(row)
 
-            print(f"💾 Saved {len(self.recorded_data)} samples to {filename}")
+            # Create DataFrame and save
+            df = pd.DataFrame(rows)
+            df.to_csv(filename, index=False)
+
+            print(f"\n💾 Saved {len(df)} samples to {filename}")
+
+            # Print statistics
+            self._print_statistics(df)
+
             return filename
 
         except Exception as e:
             print(f"❌ Save failed: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
-    def verify_markers(self):
-        """Verify marker distribution in recorded data"""
-        if not self.recorded_data:
-            print("❌ No data to verify")
-            return
+    def _print_statistics(self, df):
+        """Print detailed statistics about the recorded data"""
+        print(f"\n📊 RECORDING STATISTICS:")
+        print("=" * 60)
 
-        markers = [sample['marker'] for sample in self.recorded_data]
-        marker_counts = {}
+        # Timing info
+        duration = df['timestamp'].iloc[-1] - df['timestamp'].iloc[0]
+        sample_rate = len(df) / duration if duration > 0 else 0
 
-        for marker in markers:
-            marker_counts[marker] = marker_counts.get(marker, 0) + 1
+        print(f"⏱️  Timing:")
+        print(f"   First sample: {df['timestamp'].iloc[0]:.3f}")
+        print(f"   Last sample:  {df['timestamp'].iloc[-1]:.3f}")
+        print(f"   Duration:     {duration:.2f} seconds")
+        print(f"   Sample rate:  ~{sample_rate:.1f} Hz")
 
-        print("\n📊 MARKER DISTRIBUTION VERIFICATION:")
-        print("=" * 40)
+        # Marker distribution
+        print(f"\n🏷️  Marker Distribution:")
+        marker_counts = df['marker'].value_counts().sort_index()
+        total_samples = len(df)
+
         for marker, count in marker_counts.items():
-            percentage = (count / len(markers)) * 100
-            print(f"  {marker}: {count} samples ({percentage:.1f}%)")
+            percentage = (count / total_samples) * 100
+            duration_sec = count / sample_rate if sample_rate > 0 else 0
+            print(f"   {marker:30s}: {count:5d} samples ({percentage:5.1f}%) ~{duration_sec:.1f}s")
 
-        # Check for expected markers
-        expected_markers = [
-            "session_start", "stick_out_tongue_start", "stick_out_tongue_end",
-            "rest_period_start", "rest_period_end", "open_left_hand_start",
-            "open_left_hand_end", "clench_left_hand_start", "clench_left_hand_end",
-            "session_stop"
-        ]
+        # Task analysis
+        print(f"\n📈 Task Analysis:")
+        task_types = {}
+        for marker in marker_counts.index:
+            if marker != 'none':
+                # Extract task type (e.g., "clench_left_hand_start" -> "clench_left_hand")
+                if '_start' in marker or '_end' in marker:
+                    task_base = marker.replace('_start', '').replace('_end', '')
+                    if task_base not in task_types:
+                        task_types[task_base] = 0
+                    task_types[task_base] += marker_counts[marker]
 
-        print("\n✅ Expected markers present:")
-        for expected in expected_markers:
-            if expected in marker_counts:
-                print(f"  ✓ {expected}")
-            else:
-                print(f"  ✗ {expected} (MISSING)")
-
-    def load_and_analyze_data(self, filename):
-        """Load and analyze saved data"""
-        try:
-            df = pd.read_csv(filename)
-            print(f"\n📈 Data Analysis for {filename}:")
-            print(f"Total samples: {len(df)}")
-            print(f"Recording duration: {df['timestamp'].max() - df['timestamp'].min():.2f} seconds")
-            print(f"Sample rate: ~{len(df) / (df['timestamp'].max() - df['timestamp'].min()):.1f} Hz")
-
-            marker_dist = df['marker'].value_counts()
-            print("\nMarker distribution:")
-            for marker, count in marker_dist.items():
-                print(f"  {marker}: {count} samples")
-
-        except Exception as e:
-            print(f"❌ Analysis failed: {e}")
+        for task, count in sorted(task_types.items()):
+            percentage = (count / total_samples) * 100
+            print(f"   {task:30s}: {count:5d} samples ({percentage:5.1f}%)")
 
 
-# Usage example
 def main():
-    recorder = EEGRecorder()
+    """
+    Main function - run the data collector.
+    This should be run ALONGSIDE your GUI, not instead of it.
 
-    # Run the experiment
-    success = recorder.run_experiment_sequence()
+    Usage:
+    1. Start this script first
+    2. Then start your GUI
+    3. Run your experiment in the GUI
+    4. Press Enter here when experiment is complete
+    5. Data will be saved automatically
+    """
+    collector = EEGDataCollector()
 
-    if success:
-        print("\n🎉 Experiment completed successfully!")
+    print("=" * 60)
+    print("EEG DATA COLLECTOR")
+    print("=" * 60)
+    print("\nThis collector listens passively to EEG and Marker streams.")
+    print("Make sure your EEG device is streaming before continuing.\n")
 
-        # Generate a filename to analyze (you can specify your actual filename)
-        # recorder.load_and_analyze_data("your_eeg_data_file.csv")
-    else:
-        print("\n💥 Experiment failed!")
+    # Connect to streams
+    if not collector.connect():
+        print("\n❌ Failed to connect to streams. Exiting.")
+        return
+
+    print("\n✓ Connected successfully!")
+    print("\nNow you can start your GUI and run the experiment.")
+    print("This collector will record everything automatically.\n")
+
+    # Start recording
+    collector.start_recording()
+
+    try:
+        # Wait for user to stop
+        input("Press ENTER when experiment is complete to stop recording and save data...\n")
+
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Interrupted by user")
+
+    finally:
+        # Stop recording
+        collector.stop_recording()
+
+        # Save data
+        print("\n💾 Saving data...")
+        filename = collector.save_data()
+
+        if filename:
+            print(f"\n✅ SUCCESS! Data saved to: {filename}")
+        else:
+            print("\n❌ Failed to save data")
 
 
 if __name__ == "__main__":
