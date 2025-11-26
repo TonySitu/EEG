@@ -174,9 +174,10 @@ class MotorImageryGUI:
             # Update UI for task
             self.root.after(0, self.update_display, task)
 
-            # Send LSL marker
+            # Send LSL START marker
             marker = task.lower().replace(' ', '_')
             self.outlet.push_sample([f'{marker}_start'])
+            print(f"🚀 Sent marker: {marker}_start")
 
             # Wait for interval (task duration)
             start_time = time.time()
@@ -186,15 +187,17 @@ class MotorImageryGUI:
                 self.root.after(0, self.progress.config, {'value': progress})
                 time.sleep(0.05)
 
-            # Send end marker
+            # Send END marker (only if still running)
             if self.is_running:
                 self.outlet.push_sample([f'{marker}_end'])
+                print(f"🏁 Sent marker: {marker}_end")
                 self.trial_count += 1
                 self.root.after(0, self.update_counter)
 
                 # Rest period between trials
                 self.root.after(0, self.update_display_rest)
                 self.outlet.push_sample(['rest_period_start'])
+                print(f"😴 Sent marker: rest_period_start")
 
                 start_time = time.time()
                 while time.time() - start_time < rest_interval and self.is_running:
@@ -205,6 +208,7 @@ class MotorImageryGUI:
 
                 if self.is_running:
                     self.outlet.push_sample(['rest_period_end'])
+                    print(f"👋 Sent marker: rest_period_end")
 
         if self.is_running:
             self.root.after(0, self.training_complete)
