@@ -99,13 +99,14 @@ class EEGDataCollector:
 
     def _record_continuous(self):
         """
-         recording loop with proper timing and marker handling
+        Fixed recording loop that preserves end markers
         """
         sample_count = 0
         current_marker = "no_marker"
         session_stop_time = None
         grace_period = 2.0
         experiment_start_time = None
+        marker_hold_time = 0.1  # Hold end markers for 100ms to ensure they're captured in EEG data
 
         while self.is_recording:
             try:
@@ -122,7 +123,15 @@ class EEGDataCollector:
                     })
 
                     print(f"📍 Marker: '{new_marker}' at LSL time {marker_timestamp:.3f}")
-                    current_marker = new_marker
+
+                    # SPECIAL HANDLING FOR END MARKERS
+                    if '_end' in new_marker or new_marker == 'rest_period_end':
+                        # Keep the end marker current for a brief period
+                        current_marker = new_marker
+                        print(f"   ⏱️ Holding end marker for {marker_hold_time}s")
+                    else:
+                        # For start markers, update immediately
+                        current_marker = new_marker
 
                     # Set experiment start time on first marker
                     if experiment_start_time is None and new_marker != "session_stop":
