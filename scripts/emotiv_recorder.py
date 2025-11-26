@@ -99,21 +99,26 @@ class EEGDataCollector:
 
     def _record_continuous(self):
         """
-        Fixed recording loop that preserves end markers
+        Recording Loop for markers
         """
         sample_count = 0
         current_marker = "no_marker"
         session_stop_time = None
         grace_period = 2.0
         experiment_start_time = None
-        marker_hold_time = 0.1  # Hold end markers for 100ms to ensure they're captured in EEG data
+        marker_history = []  # Track recent markers for debugging
 
         while self.is_recording:
             try:
-                # Check for new markers (non-blocking)
-                marker_sample, marker_timestamp = self.marker_inlet.pull_sample(timeout=0.0)
-                if marker_sample is not None:
+                # Check for ALL pending markers (critical fix)
+                markers_captured = 0
+                while True:
+                    marker_sample, marker_timestamp = self.marker_inlet.pull_sample(timeout=0.0)
+                    if marker_sample is None:
+                        break
+
                     new_marker = marker_sample[0]
+                    markers_captured += 1
 
                     # Store marker event
                     self.marker_events.append({
@@ -122,16 +127,11 @@ class EEGDataCollector:
                         'relative_time': marker_timestamp - (experiment_start_time or marker_timestamp)
                     })
 
-                    print(f"📍 Marker: '{new_marker}' at LSL time {marker_timestamp:.3f}")
+                    print(f"📍 RECEIVED: '{new_marker}' at LSL time {marker_timestamp:.3f}")
+                    marker_history.append(new_marker)
 
-                    # SPECIAL HANDLING FOR END MARKERS
-                    if '_end' in new_marker or new_marker == 'rest_period_end':
-                        # Keep the end marker current for a brief period
-                        current_marker = new_marker
-                        print(f"   ⏱️ Holding end marker for {marker_hold_time}s")
-                    else:
-                        # For start markers, update immediately
-                        current_marker = new_marker
+                    # Update current marker
+                    current_marker = new_marker
 
                     # Set experiment start time on first marker
                     if experiment_start_time is None and new_marker != "session_stop":
@@ -144,6 +144,10 @@ class EEGDataCollector:
                             session_stop_time = time.time()
                             print(f"\n⏰ Session end detected! Will auto-stop in {grace_period} seconds...")
 
+                # Print if we captured multiple markers at once
+                if markers_captured > 1:
+                    print(f"⚠️ Captured {markers_captured} markers in one loop!")
+
                 # Pull EEG sample
                 eeg_sample, eeg_timestamp = self.eeg_inlet.pull_sample(timeout=0.01)
                 if eeg_sample is not None:
@@ -155,6 +159,7 @@ class EEGDataCollector:
                     else:
                         relative_time = 0.0
 
+                    # Assign current marker to this EEG sample
                     self.eeg_data.append({
                         'timestamp': eeg_timestamp,
                         'relative_time': relative_time,
