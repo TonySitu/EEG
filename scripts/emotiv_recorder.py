@@ -18,6 +18,12 @@ class EEGDataCollector:
         self.recording_thread = None
         self.eeg_inlet = None
         self.marker_inlet = None
+        self.channel_labels = []
+        self.num_eeg_channels = 32  # Default: Only save first 32 channels (actual EEG)
+        self.recording_start_time = None  # Wall clock time when recording starts
+        self.first_sample_lsl_time = None  # LSL time of first sample
+        self.channel_labels = []
+        self.num_eeg_channels = 32  # Default: Only save first 32 channels (actual EEG)
 
     def connect(self):
         """Connect to EEG and Marker streams"""
@@ -29,7 +35,26 @@ class EEGDataCollector:
                 raise Exception("No EEG stream found")
 
             self.eeg_inlet = pylsl.StreamInlet(eeg_streams[0])
-            print(f"✓ Connected to EEG: {eeg_streams[0].name()}")
+            stream_info = eeg_streams[0]
+
+            # Get channel information
+            total_channels = stream_info.channel_count()
+            print(f"✓ Connected to EEG: {stream_info.name()}")
+            print(f"   Total channels in stream: {total_channels}")
+
+            # Get channel labels if available
+            self.channel_labels = []
+            xml_info = stream_info.desc().child("channels").first_child()
+            while not xml_info.empty():
+                label = xml_info.child_value("label")
+                if label:
+                    self.channel_labels.append(label)
+                xml_info = xml_info.next_sibling()
+
+            if self.channel_labels:
+                print(f"   Channel labels: {', '.join(self.channel_labels[:5])}... (showing first 5)")
+            else:
+                print(f"   No channel labels found, will use CH1-CH{total_channels}")
 
             # Connect to Marker stream
             print("🔍 Looking for Marker stream...")
@@ -88,9 +113,12 @@ class EEGDataCollector:
                 eeg_sample, eeg_timestamp = self.eeg_inlet.pull_sample(timeout=0.01)
 
                 if eeg_sample:
+                    # Only keep the first 32 channels (actual EEG data)
+                    eeg_channels_only = eeg_sample[:self.num_eeg_channels]
+
                     self.eeg_data.append({
                         'timestamp': eeg_timestamp,
-                        'channels': eeg_sample,
+                        'channels': eeg_channels_only,
                         'sample_id': sample_count
                     })
                     sample_count += 1
@@ -204,9 +232,16 @@ class EEGDataCollector:
             filename = f"eeg_data_{timestamp}.csv"
 
         try:
-            # Create column names for all channels
+            # Create column names for EEG channels
             num_channels = len(aligned_data[0]['channels'])
-            channel_names = [f'CH{i + 1}' for i in range(num_channels)]
+
+            # Use actual channel labels if available, otherwise use CH1, CH2, etc.
+            if self.channel_labels and len(self.channel_labels) >= num_channels:
+                channel_names = self.channel_labels[:num_channels]
+            else:
+                channel_names = [f'CH{i + 1}' for i in range(num_channels)]
+
+            print(f"📊 Saving {num_channels} EEG channels: {', '.join(channel_names[:5])}... (showing first 5)")
 
             # Prepare data for DataFrame
             rows = []
